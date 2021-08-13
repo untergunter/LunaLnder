@@ -1,17 +1,38 @@
 import gym
 
 import numpy as np
-import sys
-import random
-
 import pandas as pd
-from tqdm import tqdm
+import random
 import matplotlib
 import matplotlib.pyplot as plt
-
+from random import choice
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
+
+from ipywidgets import IntProgress
+from tqdm import tqdm
+import seaborn as sns
+from collections import defaultdict
+from tqdm import tqdm
+
+import sqlite3
+
+
+def update_db(iteration,total_reward,type_of,actions_space_size):
+    statement = f"INSERT INTO results VALUES " +\
+                f"({iteration},{total_reward},'{type_of}',{actions_space_size})"
+    with sqlite3.connect('model_preformance.db') as con:
+        cur = con.cursor()
+        cur.execute(statement)
+        con.commit()
+
+def get_model_performance_by_type(model_type:str):
+    statement = f'select * from results where type="{model_type}" order by iteration asc'
+    with sqlite3.connect('model_preformance.db') as con:
+        results = pd.read_sql(statement,con)
+    return results
 
 def calc_Bellman(rewards,gamma):
     Bellman_rewards = []
@@ -23,98 +44,105 @@ def calc_Bellman(rewards,gamma):
     Bellman_rewards = Bellman_rewards[::-1]
     return Bellman_rewards
 
-class QNet(nn.Module):
-    def __init__(self, action_space,device):
-        super(QNet, self).__init__()
-        self.fc1 = nn.Linear(10, 100)
-        self.fc2 = nn.Linear(100, 100)
-        self.fc3 = nn.Linear(100, 1)
-        self.action_space = torch.from_numpy(np.array(action_space))
-        self.device = device
-
-    def forward(self, x):
-        """ input = concat(state,action)"""
-        x = torch.from_numpy(x,dtype='float32').to(self.device) if type(x)==np.ndarray else x.float().to(self.device)
-        x = F.leaky_relu(self.fc1(x))
-        x = F.leaky_relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
-    def concat_actions_states(self, state):
-        repeated = torch.tensor(state).repeat(self.action_space.shape[0], 1)
-        together = torch.tensor(np.concatenate([repeated, self.action_space], axis=1))
-        return together
-
-    def get_next_move(self, state):
-        state_and_actions = self.concat_actions_states(state)
-        with torch.no_grad():
-            predicted_score = self(state_and_actions)
-        best_index = torch.argmax(predicted_score).item()
-        wanted_action = tuple( i for i in self.action_space[best_index])
-        return wanted_action
-
-def train(steps_to_train:int,gamma:float=0.9):
-    actions = [(i, j) for i in range(0, 2) for j in range(-1, 2)]
+def make_actions():
+    actions = [(round(0.1*i,2),round(0.1 * j,2)) for i in range(1, 11) for j in range(-10,11)]
     actions.append((-1, 0))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = QNet(actions,device).to(device)
+    return actions
+
+
+class PolicyAgent:
+
+    def __init__(self):
+        self.state_action_score = defaultdict(lambda: defaultdict(list))  # state : {act:[scores]...act:[scores]}
+        self.actions = make_actions()
+
+    def normlize(self, state):
+        return tuple(np.round(state, decimals=2))
+
+    def exploit(self, state):
+        state = self.normlize(state)
+        best_score = - np.inf
+        best_action = None
+        for action in self.state_action_score[state]:
+            if len(self.state_action_score[state][action]) >0:
+                score = np.mean(self.state_action_score[state][action])
+                if score < best_score:
+                    best_action = score
+                    best_action = action
+        if best_action is None:  # never been here before - i dont know what to do !
+            action = self.explore(state)
+        return action
+
+    def explore(self, state):
+        state = self.normlize(state)
+        minimal_number_of_observations = np.inf
+        potential_steps = []
+        for action in self.actions:
+            number_of_observations = len(self.state_action_score[state][action])
+
+            if number_of_observations < minimal_number_of_observations:
+                potential_steps = [action]
+                minimal_number_of_observations = number_of_observations
+
+            elif number_of_observations == minimal_number_of_observations:
+                potential_steps.append(action)
+
+        return choice(potential_steps)
+
+    def update(self, state, action, score):
+        state = self.normlize(state)
+        score = float(score)
+        self.state_action_score[state][action].append(score)
+
+    def update_multiple(self, states, actions, scores):
+        for state, action, score in zip(states, actions, scores):
+            self.update(state, action, score)
+
+
+def train(steps: int = 100_000):
     env = gym.make('LunarLanderContinuous-v2')
     env.seed(0)
+    iterations, total_scores = [], []
+    agent = PolicyAgent()
+    for step in range(steps):
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    loss_fn = nn.L1Loss()
-
-    for _ in tqdm(range(steps_to_train)):
-
-        states,rewards = [],[]
+        states, actions, rewards = [], [], []
         state = env.reset()
         over = False
         rounds = 0
 
-        while (not over) & (rounds<201) :
-            action = model.get_next_move(state)
+        # play to learn
+        while (not over) & (rounds < 201):
+            action = agent.explore(state)
             next_state, reward, over, _ = env.step(action)
-            states.append(np.concatenate([state,action]))
+            actions.append(action)
+            states.append(state)
             rewards.append(reward)
             rounds += 1
             state = next_state
+            agent.update(state,action,reward)
+        # learn from the game
+        rewards = calc_Bellman(rewards, 0.9)
+        agent.update_multiple(states, actions, rewards)
 
+        # play to win
+        state = env.reset()
+        over = False
+        rounds = 0
+        total_score = 0
 
-        x = torch.tensor(states)
-        score_pred = model(x)
-        score_pred = score_pred.view(score_pred.shape[0])
-        optimizer.zero_grad()
-        y = torch.tensor(calc_Bellman(rewards,0.9)).to(device)
-        loss = loss_fn(score_pred, y)
-        loss.backward()
-        optimizer.step()
+        # play to learn
+        while (not over) & (rounds < 201):
+            action = agent.exploit(state)
+            next_state, reward, over, _ = env.step(action)
+            total_score += reward
+            rounds += 1
+            state = next_state
+        iterations.append(step)
+        total_scores.append(total_score)
+        print(f'iteration:{step},score:{round(total_score, 2)}')
+        update_db(step, total_score, 'policy', len(agent.actions))
+    return agent
 
-    return model
-
-if __name__ == '__main__':
-    for gamma in (0.1 * i for i in range(1,14)):
-        trined_model = train(1_000,gamma)
-        actions = [(i, j) for i in range(0, 2) for j in range(-1, 2)]
-        actions.append((-1, 0))
-        with torch.no_grad():
-            env = gym.make('LunarLanderContinuous-v2')
-            env.seed(1)
-            scores = []
-            for time in range(100):
-                state = env.reset()
-                over = False
-                rounds = 0
-                total_score = 0
-
-                while (not over) & (rounds<201) :
-                    action = trined_model.get_next_move(state)
-                    next_state, reward, over, _ = env.step(action)
-                    total_score += reward
-                    rounds += 1
-                    state = next_state
-                scores.append(total_score)
-            results = pd.DataFrame({'iteration':[i for i in range(1,len(scores)+1)],
-                          'total_reward':scores,
-                          'type':[f'100_deep_q_bellman_{gamma}' for i in range(len(scores))],
-                         'action_space_':[len(actions) for i in range(len(scores))]})
-            results.to_parquet(f'deep_q_100_100_b_g_{gamma}.parquet.gzip',compression='gzip',index=False)
+if __name__=='__main__':
+    lender = train()
