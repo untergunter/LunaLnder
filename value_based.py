@@ -1,10 +1,7 @@
 import gym
 import numpy as np
 import random
-import pandas as pd
-from tqdm import tqdm
-import matplotlib
-import matplotlib.pyplot as plt
+import os
 from dev import update_db,make_actions
 import torch
 import torch.nn as nn
@@ -23,9 +20,9 @@ def calc_Bellman(rewards,gamma):
 class QNet(nn.Module):
     def __init__(self, device,search_rate:int=1):
         super(QNet, self).__init__()
-        self.fc1 = nn.Linear(10, 30)
-        self.fc2 = nn.Linear(30, 15)
-        self.fc3 = nn.Linear(15, 1)
+        self.fc1 = nn.Linear(10, 10)
+        self.fc2 = nn.Linear(10, 10)
+        self.fc3 = nn.Linear(10, 1)
         self.action_space = torch.from_numpy(np.array(make_actions()))
         self.action_space_size = len(make_actions())
         self.device = device
@@ -56,7 +53,7 @@ class QNet(nn.Module):
             wanted_action = tuple( i for i in self.action_space[best_index])
         return wanted_action
 
-def train(steps_to_train:int,gamma:float=0.9):
+def train(steps_to_train:int,model_name:str,gamma:float=0.9):
     actions = [(i, j) for i in range(0, 2) for j in range(-1, 2)]
     actions.append((-1, 0))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,7 +67,7 @@ def train(steps_to_train:int,gamma:float=0.9):
     loss_fn = nn.L1Loss()
 
     for step in range(steps_to_train):
-
+        model.train()
         states,rewards = [],[]
         state = env.reset()
         over = False
@@ -103,21 +100,31 @@ def train(steps_to_train:int,gamma:float=0.9):
         if step%100 == 0:
 
             if model.search_rate > 0.1:
-                model.search_rate -= 0.05
+                model.search_rate -= 0.005
+            model.eval()
+            batch_score = 0
             with torch.no_grad():
-                state = test_env.reset()
-                over = False
-                rounds = 0
-                total_score = 0
-                while (not over) & (rounds < 201):
-                    action = model.get_next_move(state,search=False)
-                    next_state, reward, over, _ = env.step(action)
-                    total_score += reward
-                    rounds += 1
-                    state = next_state
-            update_db(step, total_score, "value_with_search", model.action_space_size)
+                for time in range(10):
+                    state = test_env.reset()
+                    over = False
+                    rounds = 0
+                    total_score = 0
+                    actions,scores = [],[]
+                    while (not over) & (rounds < 201):
+                        action = model.get_next_move(state,search=False)
+                        actions.append(action)
+                        next_state, reward, over, _ = env.step(action)
+                        scores.append(reward)
+                        total_score += reward
+                        rounds += 1
+                        state = next_state
+                    batch_score += total_score
+            mean_batch_score = batch_score / 10
+            model_path = f'models{os.sep}_{model_name}_{step}.pth'
+            torch.save(model.state_dict(),model_path)
+            update_db(step, mean_batch_score, model_name, model.action_space_size)
     return model
 
 if __name__ == '__main__':
-    training = train(1_000_000)
+    training = train(60_000,"value_search_small_net")
 

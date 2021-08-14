@@ -5,6 +5,7 @@ import pandas as pd
 import random
 import matplotlib
 import matplotlib.pyplot as plt
+import seaborn as sns
 from random import choice
 import torch
 import torch.nn as nn
@@ -13,7 +14,6 @@ import torch.nn.functional as F
 
 from ipywidgets import IntProgress
 from tqdm import tqdm
-import seaborn as sns
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -33,6 +33,33 @@ def get_model_performance_by_type(model_type:str):
     with sqlite3.connect('model_preformance.db') as con:
         results = pd.read_sql(statement,con)
     return results
+
+def plot_model_performance_by_type(model_type:str):
+    performance = get_model_performance_by_type(model_type)
+    p = sns.scatterplot(data=performance,x='iteration',y='total_reward')
+    plt.show()
+
+def plot_all_models_performance():
+    statement = """with best_models as (
+    select type, max(total_reward) as total_reward
+    from results
+    where iteration>100
+    group by type
+    limit 8
+    )
+    select results.*
+    from results
+    inner join best_models
+    on best_models.type=results.type
+    """
+    with sqlite3.connect('model_preformance.db') as con:
+        performance = pd.read_sql(statement,con)
+    con.close()
+    p = sns.scatterplot(data=performance,
+                        x='iteration',
+                        y='total_reward',
+                        hue='type')
+    plt.show()
 
 def calc_Bellman(rewards,gamma):
     Bellman_rewards = []
