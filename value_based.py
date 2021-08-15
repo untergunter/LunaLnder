@@ -33,7 +33,7 @@ class QNet(nn.Module):
         x = torch.from_numpy(x,dtype='float32').to(self.device) if type(x)==np.ndarray else x.float().to(self.device)
         x = F.leaky_relu(self.fc1(x))
         x = F.leaky_relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc3(x).float()
         return x
 
     def concat_actions_states(self, state):
@@ -59,12 +59,10 @@ def train(steps_to_train:int,model_name:str,gamma:float=0.9):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = QNet(device).to(device)
     env = gym.make('LunarLanderContinuous-v2')
-    env.seed(0)
     test_env = gym.make('LunarLanderContinuous-v2')
-    test_env.seed(1)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    loss_fn = nn.L1Loss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    loss_fn = nn.MSELoss()
 
     for step in range(steps_to_train):
         model.train()
@@ -86,11 +84,11 @@ def train(steps_to_train:int,model_name:str,gamma:float=0.9):
         score_pred = model(x)
         score_pred = score_pred.view(score_pred.shape[0])
         optimizer.zero_grad()
-        y_1 = torch.tensor(rewards).to(device)
+        y_1 = torch.tensor(rewards).float().to(device)
         loss_1 = loss_fn(score_pred, y_1)
         loss_1.backward(retain_graph=True)
         optimizer.zero_grad()
-        y_2 = torch.tensor(calc_Bellman(rewards,gamma)).to(device)
+        y_2 = torch.tensor(calc_Bellman(rewards,gamma)).float().to(device)
         loss_2 = loss_fn(score_pred, y_2)
         loss_2.backward()
         optimizer.step()
@@ -99,7 +97,7 @@ def train(steps_to_train:int,model_name:str,gamma:float=0.9):
 
         if step%100 == 0:
 
-            if model.search_rate > 0.1:
+            if model.search_rate > 0:
                 model.search_rate -= 0.005
             model.eval()
             batch_score = 0
@@ -126,5 +124,5 @@ def train(steps_to_train:int,model_name:str,gamma:float=0.9):
     return model
 
 if __name__ == '__main__':
-    training = train(60_000,"value_search_small_net")
+    training = train(60_000,"value_search_MSELoss")
 
